@@ -46,10 +46,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - uses: actions/setup-java@v4          # Android Gradle plugin needs Java 17 (runner default is 11)
+        with:
+          distribution: temurin
+          java-version: "17"
       - name: Build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y git zip unzip openjdk-17-jdk autoconf libtool pkg-config \
+          sudo apt-get install -y git zip unzip autoconf libtool pkg-config \
             zlib1g-dev libncurses5-dev libncursesw5-dev cmake libffi-dev libssl-dev
           pip install --upgrade buildozer "cython==0.29.36" virtualenv
       - name: Collect app files
