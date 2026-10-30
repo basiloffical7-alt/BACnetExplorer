@@ -1,0 +1,74 @@
+# Builds the Android app (APK) in the cloud. Upload the project to GitHub, then:
+# Actions tab > "Build Android APK" > Run workflow. When it finishes (20-40 min the first time),
+# download "BasilBACnet-apk" from the run page and copy the .apk to your phone.
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: App logic + screens (against the BACnet simulator)
+        run: |
+          pip install openpyxl
+          python tests/test_android_core.py
+          python tests/test_android_ui.py
+      - name: Real Kivy screenshots (phone-size window)
+        continue-on-error: true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libgl1-mesa-dri libegl1 libmtdev1
+          pip install "kivy[base]==2.3.1"
+          xvfb-run -a -s "-screen 0 1280x1024x24" python android/ci_screenshots.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: BasilBACnet-screenshots
+          path: screenshots/
+
+  apk:
+    needs: test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git zip unzip openjdk-17-jdk autoconf libtool pkg-config \
+            zlib1g-dev libncurses5-dev libncursesw5-dev cmake libffi-dev libssl-dev
+          pip install --upgrade buildozer "cython==0.29.36" virtualenv
+      - name: Collect app files
+        run: python android/prepare.py
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.buildozer
+            android_build/.buildozer
+          key: buildozer-${{ hashFiles('android/buildozer.spec') }}
+      - name: Build APK
+        working-directory: android_build
+        run: yes | buildozer -v android debug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BasilBACnet-apk
+          path: android_build/bin/*.apk
+      - name: Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: android_build/bin/*.apk
