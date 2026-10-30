@@ -64,6 +64,9 @@ jobs:
             ~/.buildozer
             android_build/.buildozer
           key: buildozer-${{ hashFiles('android/buildozer.spec') }}
+      - name: Use the app's fixed signing key
+        # every build is signed with the same key, so a new APK installs as an UPDATE over the old one
+        run: mkdir -p ~/.android && cp android/debug.keystore ~/.android/debug.keystore
       - name: Build APK
         working-directory: android_build
         run: yes | buildozer -v android debug
