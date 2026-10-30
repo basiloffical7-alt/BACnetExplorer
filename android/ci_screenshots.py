@@ -42,7 +42,11 @@ class CIApp(M.BasilApp):
 
         def shot(name):
             n[0] += 1
-            Window.screenshot(name=os.path.join(OUT, f"{n[0]:02d}_{name}_{{:02d}}.png"))
+            path = os.path.join(OUT, f"{n[0]:02d}_{name}.png")
+            try:
+                Window.screenshot(name=path)           # whole window, popups included
+            except Exception:
+                self.root.export_to_png(path)
             print("screenshot", name, flush=True)
 
         def step(delay, fn):
