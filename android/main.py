@@ -114,6 +114,66 @@ def spinner(values, text, on_change: Optional[Callable[[str], None]] = None, **k
     return s
 
 
+class Flash:
+    """Remembers the last text of each value and reports it as 'flashing' for 3 s after it changes
+    (the first value seen never flashes)."""
+    SECONDS = 3.0
+
+    def __init__(self):
+        self.last: Dict[Any, str] = {}
+        self.until: Dict[Any, float] = {}
+
+    def update(self, key, text: str) -> bool:
+        old = self.last.get(key)
+        self.last[key] = text
+        if old is not None and text not in ("", "…") and old != text:
+            self.until[key] = time.time() + self.SECONDS
+        return self.on(key)
+
+    def on(self, key) -> bool:
+        return time.time() < self.until.get(key, 0.0)
+
+    def any(self) -> bool:
+        now = time.time()
+        return any(t > now for t in self.until.values())
+
+
+def blink() -> bool:
+    return int(time.time() * 4) % 2 == 0
+
+
+def flash_row(row: Dict[str, Any], on: bool) -> Dict[str, Any]:
+    """Highlight a list row's value (yellow, blinking) while it is flashing."""
+    if on:
+        b = blink()
+        row["bg"] = T["flash"] if b else T["flash2"]
+        if b:
+            row["value_color"] = (0, 0, 0, 1)
+    return row
+
+
+class FlashTicker:
+    """Redraws a screen 4x a second while something flashes (and once more when it stops)."""
+
+    def __init__(self, flash: Flash, redraw: Callable[[], None]):
+        self.flash, self.redraw, self.ev, self.was = flash, redraw, None, False
+
+    def start(self):
+        if self.ev is None:
+            self.ev = Clock.schedule_interval(self._tick, 0.25)
+
+    def stop(self):
+        if self.ev is not None:
+            self.ev.cancel()
+            self.ev = None
+
+    def _tick(self, dt):
+        on = self.flash.any()
+        if on or self.was:
+            self.redraw()
+        self.was = on
+
+
 class Card(BoxLayout):
     """BoxLayout with a coloured background."""
     bg = ListProperty([1, 1, 1, 1])
@@ -384,6 +444,8 @@ class DeviceScreen(BaseScreen):
         self.rv = make_list()
         self.root_box.add_widget(self.rv)
         self._ev = None
+        self.flash = Flash()                       # value highlighted 3 s when it changes
+        self.ticker = FlashTicker(self.flash, self.show)
 
     def open(self, dev):
         self.dev = dev
@@ -420,10 +482,12 @@ class DeviceScreen(BaseScreen):
             if q and q not in p.name.lower() and q not in p.oid.short.lower():
                 continue
             fault = isinstance(p.flags, X.BitString) and any(p.flags.bits[:2])
-            rows.append({"title": p.name or str(p.oid), "sub": p.oid.short, "value": p.text(),
-                         "value_color": T["danger"] if fault else T["pv"],
-                         "action": "*" if core.in_watch(self.dev.instance, p.oid) else "+",
-                         "on_tap": lambda zone, data, p=p: self.tap(zone, p)})
+            txt = p.text()
+            on = self.flash.update((self.dev.instance, p.oid), txt)
+            rows.append(flash_row({"title": p.name or str(p.oid), "sub": p.oid.short, "value": txt,
+                                   "value_color": T["danger"] if fault else T["pv"],
+                                   "action": "*" if core.in_watch(self.dev.instance, p.oid) else "+",
+                                   "on_tap": lambda zone, data, p=p: self.tap(zone, p)}, on))
         self.rv.data = rows
         self.info.text = f"{len(rows)} of {len(self.items)} points  ·  tap value = write  ·  + = add to Watch"
 
@@ -444,8 +508,10 @@ class DeviceScreen(BaseScreen):
 
     def on_enter(self, *a):
         self._ev = Clock.schedule_interval(lambda dt: self.live(), max(2.0, self.app.core.refresh * 2))
+        self.ticker.start()
 
     def on_leave(self, *a):
+        self.ticker.stop()
         if self._ev:
             self._ev.cancel()
             self._ev = None
@@ -467,6 +533,10 @@ class PointScreen(BaseScreen):
         self.props: Dict[int, Any] = {}
         self.header("Point")
         card = Card(orientation="vertical", size_hint_y=None, height=dp(120), padding=dp(12))
+        self.pv_card = card
+        self.pv_row = None
+        self.flash = Flash()                       # present value highlighted 3 s when it changes
+        self.ticker = FlashTicker(self.flash, self.paint_flash)
         self.big = lbl("", 34, color=T["pv"], bold=True, halign="center")
         self.state_lbl = lbl("", 14, color=T["muted"], halign="center", size_hint_y=None, height=dp(24))
         card.add_widget(self.big)
@@ -515,6 +585,8 @@ class PointScreen(BaseScreen):
         units = self.props.get(C.PROP_UNITS)
         st = core.units_cache.get((self.dev.instance, oid, "st"))
         self.big.text = value_text(self.props.get(C.PROP_PRESENT_VALUE), oid, units, st)
+        self.flash.update((self.dev.instance, oid), self.big.text)
+        self.pv_row = None
         flags = self.props.get(C.PROP_STATUS_FLAGS)
         on = [C.STATUS_FLAGS_BITS[i] for i, b in enumerate(flags.bits[:4]) if b] \
             if isinstance(flags, X.BitString) else []
@@ -544,8 +616,21 @@ class PointScreen(BaseScreen):
             col = colors.get(r.prop, T["fg"])
             if r.prop == C.PROP_RELIABILITY:
                 col = T["good"] if not r.value else T["danger"]
-            self.grid.add_widget(self._row(C.property_name(r.prop), val, col,
-                                           bold=r.prop in colors or r.prop == C.PROP_RELIABILITY))
+            row = self._row(C.property_name(r.prop), val, col,
+                            bold=r.prop in colors or r.prop == C.PROP_RELIABILITY)
+            if r.prop == C.PROP_PRESENT_VALUE:
+                self.pv_row = row
+            self.grid.add_widget(row)
+        self.paint_flash()
+
+    def paint_flash(self):
+        """Yellow, blinking present value for 3 s after it changes."""
+        on = self.oid is not None and self.dev is not None and self.flash.on((self.dev.instance, self.oid))
+        b = blink()
+        self.pv_card.bg = list((T["flash"] if b else T["flash2"]) if on else T["card"])
+        self.big.color = (0, 0, 0, 1) if on and b else T["pv"]
+        if self.pv_row is not None:
+            self.pv_row.bg = list((T["flash"] if b else T["flash2"]) if on else T["card"])
 
     def _row(self, name, value, color, bold=False, prio: Optional[int] = None):
         row = Card(size_hint_y=None, height=dp(44), padding=(dp(10), 0), spacing=dp(6))
@@ -581,8 +666,10 @@ class PointScreen(BaseScreen):
 
     def on_enter(self, *a):
         self._ev = Clock.schedule_interval(lambda dt: self.load(), max(2.0, self.app.core.refresh * 2))
+        self.ticker.start()
 
     def on_leave(self, *a):
+        self.ticker.stop()
         if self._ev:
             self._ev.cancel()
             self._ev = None
@@ -649,6 +736,7 @@ class GraphicsScreen(BaseScreen):
     def __init__(self, app, **kw):
         super().__init__(app, name="graphics", **kw)
         self.model = app.graphics
+        self.flash = Flash()                       # points-list values highlighted 3 s on change
         r1 = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(6))
         self.page_sp = spinner([], "", self._page_chosen)
         r1.add_widget(self.page_sp)
@@ -902,11 +990,14 @@ class GraphicsScreen(BaseScreen):
         rv = make_list()
 
         def fill(*_a):
-            rv.data = [{"title": r["label"], "sub": r["linked"], "value": r["value"], "value_color": T["pv"],
-                        "on_tap": lambda z, d, r=r: (pop.dismiss(), self.tap_point(r["key"]))}
+            page = self.model.current
+            rv.data = [flash_row({"title": r["label"], "sub": r["linked"], "value": r["value"],
+                                  "value_color": T["pv"],
+                                  "on_tap": lambda z, d, r=r: (pop.dismiss(), self.tap_point(r["key"]))},
+                                 self.flash.update((page, r["key"]), r["value"]))
                        for r in self.model.point_rows(self.gw.demo)]
         fill()
-        ev = Clock.schedule_interval(fill, 1.0)
+        ev = Clock.schedule_interval(fill, 0.25)
         pop.bind(on_dismiss=lambda *a: ev.cancel())
         box.add_widget(rv)
         box.add_widget(btn("Close", pop.dismiss, size_hint_y=None, height=dp(48)))

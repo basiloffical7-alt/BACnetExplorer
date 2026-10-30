@@ -67,7 +67,13 @@ try:
     pop = popup(); field = find(pop, M.TextInput); field.text = "47.5"
     find(pop, M.Button, "WRITE").trigger()
     assert pump(4, lambda: popup() is None)
-    print("after write:", next(x["value"] for x in dv.rv.data if x["title"] == "Cooling Valve"))
+    pump(2, lambda: any("bg" in x for x in dv.rv.data if x["title"] == "Cooling Valve"))
+    cv = next(x for x in dv.rv.data if x["title"] == "Cooling Valve")
+    print("after write:", cv["value"], "| highlighted:", "bg" in cv); assert "bg" in cv, "device list flash"
+    others = [x["title"] for x in dv.rv.data if "bg" in x and x["title"] != "Cooling Valve"]
+    print("   other rows highlighted (changed by the simulator):", others)
+    dv.flash.until = {k: 0 for k in dv.flash.until}; dv.show()
+    assert not any("bg" in x for x in dv.rv.data), "flash must end"
     # binary write: Supply Fan Command OFF via buttons
     r = next(r for r in dv.rv.data if r["title"] == "Supply Fan Command"); r["on_tap"]("value", r)
     find(popup(), M.Button, "INACTIVE").trigger(); assert pump(4, lambda: popup() is None)
@@ -81,6 +87,14 @@ try:
     ps = app.screens["point"]; assert app.sm.current == "point"
     assert pump(4, lambda: ps.big.text not in ("…", ""))
     print("point screen:", ps.big.text, "|", ps.state_lbl.text, "| rows:", len(ps.grid.children))
+    before = ps.big.text
+    find(ps, M.Button, "WRITE").trigger(); f = find(popup(), M.TextInput)
+    f.text = "33" if "33" not in before else "44"; find(popup(), M.Button, "WRITE").trigger()
+    assert pump(5, lambda: popup() is None and ps.big.text != before)
+    ps.paint_flash(); print("point screen after write:", ps.big.text, "| card highlighted:",
+                           ps.pv_card.bg != list(M.T["card"]), "| PV row highlighted:", ps.pv_row.bg != list(M.T["card"]))
+    assert ps.flash.on((ps.dev.instance, ps.oid)) and ps.pv_card.bg != list(M.T["card"])
+    ps.flash.until.clear(); ps.paint_flash(); assert ps.pv_card.bg == list(M.T["card"])
     assert app.go_back() and app.sm.current == "device"
     # watch tab: live + flash
     app.tab("watch"); ws = app.screens["watch"]
