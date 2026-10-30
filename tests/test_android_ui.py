@@ -20,7 +20,7 @@ sim = subprocess.Popen([sys.executable, "bacnet_simulator.py", "--port", "47809"
 time.sleep(1)
 import main as M
 import platform_android as PA
-PA.network_info = lambda: ("127.0.0.1", 8, "127.255.255.255")
+PA.network_info = lambda *a: ("127.0.0.1", 8, "127.255.255.255")
 
 def pump(sec=1.0, until=None):
     end = time.time() + sec
@@ -113,7 +113,16 @@ try:
     print("report cards:", {k: v.text for k, v in rs.card_lbls.items()})
     rs.export(); print("export popup:", find(popup(), M.Label, "Saved").text.replace("\n", " ")); popup().dismiss()
     # settings: theme switch + persistence
-    app.tab("settings"); app.set_theme("dark")
+    app.tab("settings"); st = app.screens["settings"]
+    print("adapters:", st.adapter_sp.values)
+    choice = st.adapter_sp.values[-1]; st.adapter_sp.text = choice
+    print("chose adapter:", choice, "->", st.adapter_name, st.ip.text, st.bc.text)
+    if st.adapter_name:
+        st.ip.text, st.bc.text = "127.0.0.1", "127.255.255.255"     # simulator is on loopback
+    st.apply(); assert app.core.online and app.core.settings["net"]["adapter"] == st.adapter_name
+    app.update_status(); print("status:", app.status_label.text)
+    st.adapter_sp.text = "Automatic"; st.apply(); assert app.core.settings["net"]["adapter"] == ""
+    app.set_theme("dark")
     print("theme now:", app.theme, "screen:", app.sm.current, "bg:", M.T["bg"])
     app.set_theme("light")
     # logout -> login screen, auto login off

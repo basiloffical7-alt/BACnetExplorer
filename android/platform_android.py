@@ -63,8 +63,12 @@ def _fallback_ip() -> str:
         return "0.0.0.0"
 
 
-def network_info() -> Tuple[str, int, str]:
-    """(local IPv4, prefix length, broadcast address) of the active Wi-Fi / Ethernet network."""
+def network_info(adapter: str = "") -> Tuple[str, int, str]:
+    """(local IPv4, prefix length, broadcast address) of the chosen adapter, or of the active network."""
+    if adapter:
+        a = find_adapter(adapter)
+        if a:
+            return a["ip"], a["prefix"], a["broadcast"]
     ip, prefix = "", 24
     if IS_ANDROID:
         try:
@@ -96,6 +100,110 @@ def network_info() -> Tuple[str, int, str]:
     except ValueError:
         bc = "255.255.255.255"
     return ip, prefix, bc
+
+
+# ---------------------------------------------------------------- network adapters
+KIND_NAMES = {0: "Mobile data", 1: "Wi-Fi", 2: "Bluetooth", 3: "Ethernet", 4: "VPN", 8: "USB"}
+_bound = None          # interface name the app is currently bound to ("" = automatic)
+
+
+def _bc(ip: str, prefix: int) -> str:
+    try:
+        return str(ipaddress.IPv4Network(f"{ip}/{prefix}", strict=False).broadcast_address)
+    except ValueError:
+        return "255.255.255.255"
+
+
+def _android_networks():
+    """[(java Network, info dict)] for every connected network that has an IPv4 address."""
+    from jnius import autoclass  # type: ignore
+    Context = autoclass("android.content.Context")
+    cm = _activity().getSystemService(Context.CONNECTIVITY_SERVICE)
+    out = []
+    for net in cm.getAllNetworks():
+        try:
+            caps = cm.getNetworkCapabilities(net)
+            lp = cm.getLinkProperties(net)
+            if caps is None or lp is None:
+                continue
+            kind = next((name for t, name in ((3, "Ethernet"), (8, "USB"), (1, "Wi-Fi"), (0, "Mobile data"),
+                                              (4, "VPN"), (2, "Bluetooth")) if caps.hasTransport(t)), "Network")
+            iface = str(lp.getInterfaceName() or "")
+            addrs = lp.getLinkAddresses()
+            for i in range(addrs.size()):
+                la = addrs.get(i)
+                host = str(la.getAddress().getHostAddress() or "")
+                if host and "." in host and ":" not in host:
+                    prefix = int(la.getPrefixLength())
+                    out.append((net, {"name": iface, "kind": kind, "ip": host, "prefix": prefix,
+                                      "broadcast": _bc(host, prefix)}))
+                    break
+        except Exception as e:
+            print("adapter:", e)
+    return out
+
+
+def list_adapters() -> list:
+    """Network adapters with an IPv4 address: [{name, kind, ip, prefix, broadcast}].
+    On a phone this lists Wi-Fi, a USB-C Ethernet adapter, mobile data ..."""
+    if IS_ANDROID:
+        try:
+            return [info for _n, info in _android_networks()]
+        except Exception as e:
+            print("adapters:", e)
+            return []
+    out = []
+    try:
+        import psutil  # type: ignore
+        for name, addrs in psutil.net_if_addrs().items():
+            for a in addrs:
+                if a.family == socket.AF_INET and a.netmask and not a.address.startswith("127."):
+                    prefix = ipaddress.IPv4Network(f"0.0.0.0/{a.netmask}").prefixlen
+                    kind = "Wi-Fi" if name.lower().startswith(("wl", "wi")) else "Ethernet"
+                    out.append({"name": name, "kind": kind, "ip": a.address, "prefix": prefix,
+                                "broadcast": _bc(a.address, prefix)})
+    except Exception:
+        ip = _fallback_ip()
+        if ip != "0.0.0.0":
+            out.append({"name": "default", "kind": "Network", "ip": ip, "prefix": 24, "broadcast": _bc(ip, 24)})
+    return out
+
+
+def adapter_label(a: dict) -> str:
+    return f"{a['kind']} ({a['name']})  {a['ip']}/{a['prefix']}"
+
+
+def find_adapter(name: str) -> Optional[dict]:
+    return next((a for a in list_adapters() if a["name"] == name), None) if name else None
+
+
+def bind_to_adapter(name: str) -> bool:
+    """Send/receive ALL of the app's traffic through one adapter (e.g. the USB-C Ethernet "eth0")
+    even while Wi-Fi or mobile data is also connected. "" = automatic (Android's default network).
+    Returns False if that adapter is not connected."""
+    global _bound
+    if not IS_ANDROID:
+        _bound = name
+        return not name or find_adapter(name) is not None
+    try:
+        from jnius import autoclass  # type: ignore
+        Context = autoclass("android.content.Context")
+        cm = _activity().getSystemService(Context.CONNECTIVITY_SERVICE)
+        if not name:
+            cm.bindProcessToNetwork(None)
+            _bound = ""
+            return True
+        for net, info in _android_networks():
+            if info["name"] == name:
+                ok = bool(cm.bindProcessToNetwork(net))
+                _bound = name if ok else ""
+                return ok
+        cm.bindProcessToNetwork(None)
+        _bound = ""
+        return False
+    except Exception as e:
+        print("bind adapter:", e)
+        return False
 
 
 def device_id() -> str:

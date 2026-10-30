@@ -28,7 +28,7 @@ sim = subprocess.Popen([sys.executable, "bacnet_simulator.py", "--port", "47809"
 time.sleep(1.5)
 import main as M  # noqa: E402
 import platform_android as PA  # noqa: E402
-PA.network_info = lambda: ("127.0.0.1", 8, "127.255.255.255")
+PA.network_info = lambda *a: ("127.0.0.1", 8, "127.255.255.255")
 
 
 class CIApp(M.BasilApp):

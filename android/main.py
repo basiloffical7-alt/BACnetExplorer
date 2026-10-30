@@ -1030,8 +1030,15 @@ class SettingsScreen(BaseScreen):
         line("Write priority", spinner([str(k) for k in range(1, 17)], str(core.priority),
                                        lambda v: (core.settings.__setitem__("priority", int(v)), core.save())))
         section("Network")
-        ip, prefix, bc = PA.network_info()
         net = core.settings.get("net", {})
+        self.adapter_sp = spinner([], "Automatic", self.adapter_chosen)
+        self.adapter_name = net.get("adapter", "")
+        self.fill_adapters()
+        line("Adapter", self.adapter_sp)
+        grid.add_widget(lbl("Choose the USB-C Ethernet adapter or Wi-Fi to use for BACnet. "
+                            "Automatic = Android's current network.", 12, color=T["muted"],
+                            size_hint_y=None, height=dp(36)))
+        ip, prefix, bc = PA.network_info(self.adapter_name)
         self.ip = inp(net.get("ip", "") or ip, "Phone IP")
         self.bc = inp(net.get("broadcast", "") or bc, "Broadcast")
         self.port = inp(str(net.get("port", 47808)), "Local UDP port", number=True)
@@ -1044,7 +1051,7 @@ class SettingsScreen(BaseScreen):
         line("BBMD (other subnet)", self.bbmd)
         grid.add_widget(lbl(f"Detected network: {ip}/{prefix}, broadcast {bc}", 12, color=T["muted"],
                             size_hint_y=None, height=dp(22)))
-        grid.add_widget(btn("Auto-detect", self.autodetect, size_hint_y=None, height=dp(46)))
+        grid.add_widget(btn("Rescan adapters / Auto-detect", self.autodetect, size_hint_y=None, height=dp(46)))
         grid.add_widget(btn("Apply & reconnect", self.apply, "accent", size_hint_y=None, height=dp(52)))
         section("Account")
         r = BoxLayout(size_hint_y=None, height=dp(48))
@@ -1063,9 +1070,33 @@ class SettingsScreen(BaseScreen):
         sc.add_widget(grid)
         self.root_box.add_widget(sc)
 
+    def fill_adapters(self):
+        """(Re)list the phone's adapters - plug the USB-C adapter in, then press Rescan."""
+        self.adapters = {PA.adapter_label(a): a for a in PA.list_adapters()}
+        self.adapter_sp.values = ["Automatic"] + list(self.adapters)
+        cur = next((lab for lab, a in self.adapters.items() if a["name"] == self.adapter_name), None)
+        if self.adapter_name and cur is None:
+            cur = f"{self.adapter_name} (not connected)"
+        self._filling = True
+        self.adapter_sp.text = cur or "Automatic"
+        self._filling = False
+
+    def adapter_chosen(self, label: str):
+        if getattr(self, "_filling", False):
+            return
+        a = self.adapters.get(label)
+        self.adapter_name = a["name"] if a else ("" if label == "Automatic" else self.adapter_name)
+        if a:
+            self.ip.text, self.bc.text = a["ip"], a["broadcast"]
+        elif label == "Automatic":
+            ip, _p, bc = PA.network_info()
+            self.ip.text, self.bc.text = ip, bc
+
     def autodetect(self):
-        ip, _p, bc = PA.network_info()
+        self.fill_adapters()
+        ip, _p, bc = PA.network_info(self.adapter_name)
         self.ip.text, self.bc.text = ip, bc
+        toast(f"{len(self.adapters)} adapter(s) found")
 
     def apply(self):
         def num(w, d):
@@ -1075,7 +1106,7 @@ class SettingsScreen(BaseScreen):
                 return d
         self.app.core.settings["net"] = {"ip": self.ip.text.strip(), "broadcast": self.bc.text.strip(),
                                          "port": num(self.port, 47808), "remote_port": num(self.rport, 47808),
-                                         "bbmd": self.bbmd.text.strip()}
+                                         "bbmd": self.bbmd.text.strip(), "adapter": self.adapter_name}
         self.app.core.save()
         self.app.connect()
 
@@ -1280,7 +1311,15 @@ class BasilApp(App):
     def connect(self):
         PA.acquire_multicast_lock()
         net = self.core.settings.get("net", {})
-        ip, _p, bc = PA.network_info()
+        adapter = net.get("adapter", "")
+        if not PA.bind_to_adapter(adapter):
+            message("Network", f"The adapter '{adapter}' is not connected.\n\nPlug in the USB-C adapter and "
+                               "check its cable / IP address, or choose another adapter in Settings > Network.")
+        ip, _p, bc = PA.network_info(adapter)
+        if adapter:                        # the chosen adapter's own address, not an old saved one
+            a = PA.find_adapter(adapter)
+            if a:
+                net = dict(net, ip=a["ip"], broadcast=a["broadcast"])
         err = self.core.connect(net.get("ip") or ip, net.get("broadcast") or bc, int(net.get("port", 47808)),
                                 int(net.get("remote_port", 47808)), net.get("bbmd", ""))
         if err:
@@ -1308,7 +1347,10 @@ class BasilApp(App):
             return
         cl = self.core.client
         if cl and cl.running:
-            self.status_label.text = f"[color={hexc(T['good'])}]Online[/color]  {cl.local_ip}  ·  {len(cl.devices)} devices"
+            ad = PA.find_adapter(self.core.settings.get("net", {}).get("adapter", ""))
+            via = f"{ad['kind']}  " if ad else ""
+            self.status_label.text = (f"[color={hexc(T['good'])}]Online[/color]  {via}{cl.local_ip}  ·  "
+                                      f"{len(cl.devices)} devices")
         else:
             self.status_label.text = f"[color={hexc(T['danger'])}]Offline[/color]"
 

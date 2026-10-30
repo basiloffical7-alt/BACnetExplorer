@@ -26,6 +26,14 @@ You need a GitHub account (free) and about 30 minutes the first time.
 ## Using it
 * Log in: **admin / Basil@12345** (tick *Keep me signed in* for auto login).
 * The phone must be on the **same Wi-Fi/LAN** as the BACnet devices (or use a BBMD in *Settings ▸ Network*).
+* **USB-C Ethernet adapter:** plug it in, open *Settings ▸ Network*, tap *Rescan adapters*, choose
+  *Ethernet (eth0)* under **Adapter**, then *Apply & reconnect*. All BACnet traffic then goes through the cable,
+  even while Wi-Fi stays on. The adapter needs an IP address (DHCP on that network, or the phone's own
+  Ethernet static-IP setting where available).
 * Tabs: **Devices** (Discover, + IP), **Watch** (live list, flashes on change), **Graphics**, **Report** (Excel + Share), **Settings**.
 * Tap a value to write it; tap **+** to add a point to Watch; tap a name to open all its properties and the priority array.
 * Not on Android: changing the PC's IP address (Android doesn't allow apps to change the Wi-Fi IP).
+
+## Updates
+Every build is signed with the same key (`android/debug.keystore`), so a newer APK installs as an update over
+the old one and keeps your settings. (APKs built before this key was added must be uninstalled once.)
