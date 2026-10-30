@@ -23,7 +23,7 @@ jobs:
       - name: App logic + screens (against the BACnet simulator)
         continue-on-error: true
         run: |
-          pip install openpyxl
+          pip install openpyxl pillow
           python tests/test_android_core.py
           python tests/test_android_ui.py
       - name: Real Kivy screenshots (phone-size window)
