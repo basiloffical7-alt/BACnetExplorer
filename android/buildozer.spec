@@ -17,10 +17,13 @@ fullscreen = 0
 android.permissions = INTERNET, ACCESS_NETWORK_STATE, ACCESS_WIFI_STATE, CHANGE_WIFI_MULTICAST_STATE
 android.api = 34
 android.minapi = 24
-android.archs = arm64-v8a, armeabi-v7a
+# 64-bit phones (all phones from ~2017 on). Building two archs at once corrupts p4a's pip.
+android.archs = arm64-v8a
 android.accept_sdk_license = True
 android.allow_backup = True
 android.release_artifact = apk
+# fixed python-for-android release (not the moving 'master')
+p4a.branch = v2026.05.09
 
 [buildozer]
 log_level = 2
