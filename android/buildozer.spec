@@ -22,8 +22,10 @@ android.archs = arm64-v8a
 android.accept_sdk_license = True
 android.allow_backup = True
 android.release_artifact = apk
-# fixed python-for-android release (not the moving 'master')
-p4a.branch = v2026.05.09
+# python-for-android 'develop' pinned to a fixed commit (2026-10-27): its pip step installs
+# Android wheels correctly (the v2026.05.09 release fails on charset_normalizer)
+p4a.branch = develop
+p4a.commit = 1c9a4b4f817847bd8505d972d1a0e6f965929a88
 
 [buildozer]
 log_level = 2
