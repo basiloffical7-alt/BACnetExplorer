@@ -1,0 +1,68 @@
+# Builds the Windows .exe files in the cloud - no Python needed on your PC.
+# Push this project to a GitHub repository, then: Actions tab > "Build Windows exe" >
+# open the finished run > download the artifacts. Pushing a tag like v1.2.0 also
+# creates a GitHub Release with both zips attached.
+name: Build Windows exe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows-10-11-64bit       # modern Python: Windows 8.1 / 10 / 11, 64-bit
+            python: "3.12"
+            arch: x64
+          - label: Windows-7-and-later-32bit # Python 3.8 32-bit: Windows 7 SP1 .. 11, 32 & 64-bit
+            python: "3.8"
+            arch: x86
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          architecture: ${{ matrix.arch }}
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller psutil
+      - name: Sanity checks
+        run: |
+          python -c "import tkinter, sys; print(sys.version)"
+          python -c "import sys; sys.path.insert(0, '.'); from graphics import load_templates; t, e = load_templates(); print(sorted(t)); assert not e, e"
+          python -m py_compile bacnet_explorer.py bacnet_simulator.py netconfig.py
+      - name: Build
+        run: python -m PyInstaller --noconfirm --clean packaging/BACnetExplorer.spec
+      - name: Smoke test simulator exe
+        shell: pwsh
+        run: |
+          $p = Start-Process dist/BasilBACnetSimulator.exe -ArgumentList '--port','47900' -PassThru
+          Start-Sleep 4
+          if ($p.HasExited) { throw "simulator exited early" }
+          Stop-Process $p
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/graphics | Out-Null
+          Copy-Item graphics/README.md dist/graphics/
+          Copy-Item README.md dist/
+          Compress-Archive -Path dist/* -DestinationPath BasilBACnetExplorer-${{ matrix.label }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BasilBACnetExplorer-${{ matrix.label }}
+          path: BasilBACnetExplorer-${{ matrix.label }}.zip
+      - name: Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: BasilBACnetExplorer-${{ matrix.label }}.zip
