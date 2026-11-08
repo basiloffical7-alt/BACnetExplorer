@@ -110,3 +110,80 @@ class Auth:
         rec = self.settings.pop("restart_token", None)
         return bool(tok and isinstance(rec, dict) and time.time() - float(rec.get("time", 0)) < 60
                     and hmac.compare_digest(str(rec.get("t", "")), tok))
+
+
+# ---------------------------------------------------------------- 30-day trial
+TRIAL_DAYS = 30
+DAY = 86400.0
+# activation password, stored only as a salted PBKDF2 hash (the password itself is not in the app)
+_ACT_SALT = bytes.fromhex("e9e564a39205d4e00d2ee9555b3a03c8")
+_ACT_HASH = "78139751316210e7fbbb00ece4aa6e685503e83ff8d1ef7f9365b4fdde09efd5"
+_SIGN_KEY = bytes.fromhex("9313e40290df94da23108e2ac974a710")
+
+
+class Trial:
+    """The app runs for TRIAL_DAYS days from its first start; after that it stops until the
+    activation password is entered once (then it is activated for good on this install).
+
+    The record in the settings is signed, so editing the dates in the file ends the trial,
+    and moving the phone's clock back does not give extra days (the latest time seen is kept)."""
+
+    def __init__(self, settings: Dict[str, Any], days: int = TRIAL_DAYS):
+        self.settings = settings
+        self.days = days
+
+    @staticmethod
+    def _sig(*parts: Any) -> str:
+        return hmac.new(_SIGN_KEY, "|".join(str(p) for p in parts).encode(), "sha256").hexdigest()
+
+    def _rec(self) -> Dict[str, Any]:
+        rec = self.settings.get("trial")
+        if not isinstance(rec, dict) or "start" not in rec:
+            now = round(time.time())
+            rec = {"start": now, "last": now, "sig": self._sig("t", now, now)}
+            self.settings["trial"] = rec
+        return rec
+
+    def _valid(self, rec: Dict[str, Any]) -> bool:
+        return hmac.compare_digest(str(rec.get("sig", "")), self._sig("t", rec.get("start"), rec.get("last")))
+
+    def activated(self) -> bool:
+        rec = self._rec()
+        return hmac.compare_digest(str(rec.get("act", "")), self._sig("activated", rec.get("start")))
+
+    def touch(self):
+        """Remember the latest time seen (call at start and from time to time)."""
+        rec = self._rec()
+        if not self._valid(rec):
+            return
+        last = max(int(rec["last"]), round(time.time()))
+        if last != rec["last"]:
+            rec["last"] = last
+            rec["sig"] = self._sig("t", rec["start"], last)
+
+    def days_used(self) -> float:
+        rec = self._rec()
+        if not self._valid(rec):
+            return float(self.days)                      # edited record -> trial over
+        now = max(time.time(), float(rec["last"]))       # clock moved back -> use latest seen
+        return max(0.0, (now - float(rec["start"])) / DAY)
+
+    def days_left(self) -> int:
+        return max(0, int(-(-(self.days - self.days_used()) // 1)))   # rounded up
+
+    def expired(self) -> bool:
+        return not self.activated() and self.days_used() >= self.days
+
+    def expiry_date(self) -> str:
+        rec = self._rec()
+        return time.strftime("%d %b %Y", time.localtime(float(rec["start"]) + self.days * DAY))
+
+    def activate(self, password: str) -> bool:
+        if not hmac.compare_digest(hash_password(password, _ACT_SALT), _ACT_HASH):
+            return False
+        rec = self._rec()
+        if not self._valid(rec):                         # repair an edited record
+            rec["last"] = max(int(rec.get("last") or 0), round(time.time()))
+            rec["sig"] = self._sig("t", rec["start"], rec["last"])
+        rec["act"] = self._sig("activated", rec["start"])
+        return True

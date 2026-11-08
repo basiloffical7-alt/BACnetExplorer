@@ -96,6 +96,33 @@ try:
     assert ps.flash.on((ps.dev.instance, ps.oid)) and ps.pv_card.bg != list(M.T["card"])
     ps.flash.until.clear(); ps.paint_flash(); assert ps.pv_card.bg == list(M.T["card"])
     assert app.go_back() and app.sm.current == "device"
+    # out-of-service on an INPUT, then write its value, write description, put back in service
+    r = next(r for r in dv.rv.data if r["title"] == "Supply Air Temp"); r["on_tap"]("title", r)
+    assert pump(4, lambda: ps.big.text not in ("…", "") and "?" not in ps.oos_btn.text)
+    print("AI before:", ps.big.text, "|", ps.oos_btn.text)
+    find(ps, M.Button, "Out of service").trigger()
+    assert pump(4, lambda: "YES" in ps.oos_btn.text.split("(")[0]); print("after toggle:", ps.oos_btn.text)
+    ps.write(); f = find(popup(), M.TextInput); f.text = "5.5"; find(popup(), M.Button, "WRITE").trigger()
+    assert pump(4, lambda: popup() is None and ps.big.text.startswith("5.5")); print("AI written while OOS:", ps.big.text)
+    ps.write_other(); pop = popup()
+    sp = next(w for w in pop.walk() if isinstance(w, M.Spinner) and "out-of-service" in w.text)
+    sp.text = "28 - description"; pump(2, lambda: "Now:" in find(pop, M.Label, "description").text)
+    fld = next(w for w in pop.walk() if isinstance(w, M.TextInput) and getattr(w, "hint_text", "") == "New value"); fld.text = "Written from Basil"
+    find(pop, M.Button, "WRITE").trigger(); assert pump(4, lambda: popup() is None)
+    assert pump(4, lambda: any("Written from Basil" in str(getattr(w, "text", "")) for w in ps.grid.walk()))
+    print("description written: OK")
+    find(ps, M.Button, "Out of service").trigger(); assert pump(4, lambda: "NO" in ps.oos_btn.text.split("(")[0])
+    assert app.go_back()
+    # release all commands of the device (one click)
+    find(dv, M.Button, "Release all").trigger(); pop = popup()
+    find(pop, M.Button, "RELEASE ALL").trigger()
+    def released_text():
+        return next((w.text for w in pop.walk() if isinstance(w, M.Label) and "points released" in str(w.text)), "")
+    assert pump(20, lambda: released_text() != ""), "release all did not finish"
+    print("release all:", released_text().replace("\n", " | "))
+    find(pop, M.Button, "Close").trigger()
+    pump(1)
+    print("cooling valve after release:", next(x["value"] for x in dv.rv.data if x["title"] == "Cooling Valve"))
     # watch tab: live + flash
     app.tab("watch"); ws = app.screens["watch"]
     assert pump(4, lambda: all(r["value"] not in ("-", "") for r in ws.rv.data))
@@ -141,6 +168,23 @@ try:
     app.set_theme("light")
     # logout -> login screen, auto login off
     app.logout(); assert isinstance(holder.children[0], M.LoginView) and not app.core.auth.autologin_ok()
+    # 30-day trial: login screen shows days left; after 30 days the app locks until activated
+    print("login screen trial note:", find(holder.children[0], M.Label, "days left").text)
+    import authcore
+    r = app.trial._rec(); r["start"] -= 31 * authcore.DAY; r["last"] = r["start"]
+    r["sig"] = app.trial._sig("t", r["start"], r["last"])
+    app.check_trial(); tv = holder.children[0]
+    assert isinstance(tv, M.TrialView), "app must lock after 30 days"
+    print("after 30 days:", find(tv, M.Label, "trial has ended").text.replace("\n", " "))
+    app.show_main(); assert isinstance(holder.children[0], M.TrialView), "main screen must stay locked"
+    tv.pw.text = "Basil@12345"; tv.activate(); print("normal password on lock screen:", tv.msg.text)
+    tv.pw.text = "BasilAhmed@12345"; tv.activate()
+    assert app.trial.activated() and not app.trial.expired() and isinstance(holder.children[0], M.LoginView)
+    app.core.save()
+    app2 = M.BasilApp(); app2.user_data_dir = data; h2 = app2.build()
+    print("restart after activation ->", type(h2.children[0]).__name__, "| activated:", app2.trial.activated())
+    assert not isinstance(h2.children[0], M.TrialView)
+    app2.on_stop()
     app.on_stop()
     print("ANDROID UI WALKTHROUGH PASSED")
 finally:

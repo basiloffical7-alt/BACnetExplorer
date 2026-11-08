@@ -338,6 +338,225 @@ def write_popup(app: "BasilApp", dev, oid: ObjectId, name: str, current: Any, un
     return pop
 
 
+# Properties offered by "Write property…" (number, name, default value type)
+WRITE_PROPS = [(85, "present-value", None), (81, "out-of-service", "Boolean"),
+               (104, "relinquish-default", None), (77, "object-name", "CharacterString"),
+               (28, "description", "CharacterString"), (84, "polarity", "Enumerated"),
+               (117, "units", "Enumerated"), (103, "reliability", "Enumerated"),
+               (22, "cov-increment", "Real"), (25, "deadband", "Real"), (45, "high-limit", "Real"),
+               (59, "low-limit", "Real"), (65, "max-pres-value", "Real"), (69, "min-pres-value", "Real"),
+               (17, "notification-class", "Unsigned"), (113, "time-delay", "Unsigned"),
+               (35, "event-enable", "BitString"), (52, "limit-enable", "BitString"),
+               (74, "number-of-states", "Unsigned"), (110, "state-text", "CharacterString")]
+PROP_TYPE = {n: t for n, _nm, t in WRITE_PROPS}
+ENUM_CHOICES = {84: [("0 - normal", 0), ("1 - reverse", 1)],
+                103: [("0 - no-fault-detected", 0), ("1 - no-sensor", 1), ("2 - over-range", 2),
+                      ("3 - under-range", 3), ("4 - open-loop", 4), ("5 - shorted-loop", 5),
+                      ("7 - unreliable-other", 7)]}
+
+
+def _value_type(oid: ObjectId, prop: int, current: Any) -> str:
+    if current is not None and not isinstance(current, X.Null):
+        tn = X.type_name_of(current)
+        if tn in X.WRITABLE_TYPES:
+            return tn
+    if prop in (C.PROP_PRESENT_VALUE, C.PROP_RELINQUISH_DEFAULT):
+        if oid.type in C.BINARY_TYPES:
+            return "Enumerated"
+        if oid.type in C.MULTISTATE_TYPES:
+            return "Unsigned"
+        if oid.type in C.ANALOG_TYPES:
+            return "Real"
+    return PROP_TYPE.get(prop) or "Real"
+
+
+def prop_write_popup(app: "BasilApp", dev, oid: ObjectId, prop: int, current: Any = None,
+                     after: Optional[Callable[[Any], None]] = None, choose_prop: bool = False):
+    """Write ANY property of a point (out-of-service, description, limits, polarity ...).
+    choose_prop=True lets the user pick the property (or type its number)."""
+    box = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(8))
+    pop = Popup(title=f"Write property  {oid.short}"[:60], content=box, size_hint=(0.94, None),
+                height=dp(560), separator_color=T["accent"])
+    state = {"prop": prop, "current": current}
+    status = lbl("", 14, color=T["muted"], size_hint_y=None, height=dp(44))
+    head = lbl("", 16, size_hint_y=None, height=dp(48))
+    type_sp = spinner([t for t in X.WRITABLE_TYPES if t != "Null"], _value_type(oid, prop, current),
+                      size_hint_y=None, height=dp(44))
+    field = inp("", "New value", size_hint_y=None, height=dp(52))
+    choices = GridLayout(cols=2, spacing=dp(8), size_hint_y=None)
+    choices.bind(minimum_height=choices.setter("height"))
+    prio = spinner(["none"] + [f"{k} - {C.PRIORITY_NAMES[k - 1]}" for k in range(1, 17)], "none",
+                   size_hint_y=None, height=dp(44))
+
+    def send(value):
+        p = state["prop"]
+        lv = None if prio.text == "none" else int(prio.text.split(" ")[0])
+        status.text = "Writing…"
+
+        def work_done(_v):
+            pop.dismiss()
+            toast(f"{C.property_name(p)} written")
+            if after:
+                after(value)
+
+        def bad(e):
+            status.text = f"[color={hexc(T['danger'])}]Failed: {e}[/color]"
+        app.core.write_any(dev, oid, p, value, lv, work_done, bad)
+
+    def refresh():
+        p, cur = state["prop"], state["current"]
+        now = "-" if cur is None else X.format_value(cur, oid.type, p)
+        head.text = f"[b]{C.property_name(p)}[/b]  ({p})\nNow: {now}"[:160]
+        choices.clear_widgets()
+        tn = type_sp.text
+        if tn == "Boolean":
+            for text, v in (("TRUE / YES", True), ("FALSE / NO", False)):
+                choices.add_widget(btn(text, lambda v=v: send(v), "accent" if v else "normal", size=17,
+                                       size_hint_y=None, height=dp(60)))
+        elif p in (C.PROP_PRESENT_VALUE, C.PROP_RELINQUISH_DEFAULT) and oid.type in C.BINARY_TYPES:
+            for text, v in (("ACTIVE / ON", 1), ("INACTIVE / OFF", 0)):
+                choices.add_widget(btn(text, lambda v=v: send(X.Enumerated(v)), size=16,
+                                       size_hint_y=None, height=dp(56)))
+        elif p in ENUM_CHOICES:
+            for text, v in ENUM_CHOICES[p]:
+                choices.add_widget(btn(text, lambda v=v: send(X.Enumerated(v)), size=14,
+                                       size_hint_y=None, height=dp(50)))
+        if cur is not None and not isinstance(cur, X.Null) and not field.text:
+            field.text = X.format_plain(cur) if hasattr(X, "format_plain") else str(cur)
+
+    def write_text():
+        try:
+            txt = field.text
+            tn = type_sp.text
+            p = state["prop"]
+            if p in (C.PROP_PRESENT_VALUE, C.PROP_RELINQUISH_DEFAULT) and tn not in ("Boolean", "BitString",
+                                                                                    "CharacterString"):
+                value = parse_value(oid, txt, state["current"])
+            elif tn == "Boolean":
+                value = txt.strip().lower() in ("1", "true", "yes", "on", "active")
+            else:
+                value = X.parse_user_value(txt, tn)
+            send(value)
+        except (ValueError, TypeError) as e:
+            status.text = f"[color={hexc(T['danger'])}]{e}[/color]"
+
+    if choose_prop:
+        names = [f"{n} - {nm}" for n, nm, _t in WRITE_PROPS] + ["other (type the number)"]
+        num = inp("", "Property number, e.g. 81", number=True, size_hint_y=None, height=dp(48))
+
+        def pick(text):
+            if text.startswith("other"):
+                return
+            set_prop(int(text.split(" ")[0]))
+
+        def set_prop(n):
+            state["prop"] = n
+            state["current"] = None
+            field.text = ""
+            type_sp.text = _value_type(oid, n, None)
+            refresh()
+            status.text = "Reading…"
+
+            def got(v):
+                state["current"] = v
+                status.text = ""
+                refresh()
+            app.core.read_any(dev, oid, n, got, lambda e: setattr(status, "text", f"Can't read: {e}"))
+        psp = spinner(names, f"{prop} - {C.property_name(prop)}", pick, size_hint_y=None, height=dp(44))
+        num.bind(on_text_validate=lambda *_: num.text.strip().isdigit() and set_prop(int(num.text)))
+        r = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(6))
+        r.add_widget(psp)
+        r.add_widget(num)
+        box.add_widget(r)
+    box.add_widget(head)
+    tr = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
+    tr.add_widget(lbl("Value type", 13, color=T["muted"], size_hint_x=0.35))
+    tr.add_widget(type_sp)
+    box.add_widget(tr)
+    type_sp.bind(text=lambda *a: refresh())
+    sc = ScrollView(do_scroll_x=False)
+    sc.add_widget(choices)
+    box.add_widget(sc)
+    fr = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(6))
+    fr.add_widget(field)
+    fr.add_widget(btn("WRITE", write_text, "accent", size=16, size_hint_x=None, width=dp(96)))
+    box.add_widget(fr)
+    field.bind(on_text_validate=lambda *_: write_text())
+    pr = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
+    pr.add_widget(lbl("Priority", 13, color=T["muted"], size_hint_x=0.35))
+    pr.add_widget(prio)
+    box.add_widget(pr)
+    if oid.type in C.COMMANDABLE_TYPES and prop == C.PROP_PRESENT_VALUE:
+        prio.text = f"{app.core.priority} - {C.PRIORITY_NAMES[app.core.priority - 1]}"
+    box.add_widget(status)
+    box.add_widget(btn("Cancel", pop.dismiss, size_hint_y=None, height=dp(46)))
+    refresh()
+    pop.open()
+    return pop
+
+
+def release_all_popup(app: "BasilApp", dev, oids: List[ObjectId], after: Optional[Callable[[], None]] = None):
+    """One click: release the commands of every commandable point of a device."""
+    n = sum(1 for o in oids if o.type in C.COMMANDABLE_TYPES)
+    box = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(8))
+    pop = Popup(title=f"Release all commands - {dev.name or dev.instance}"[:60], content=box,
+                size_hint=(0.94, None), height=dp(470), separator_color=T["accent"])
+    box.add_widget(lbl(f"Writes NULL (release) to the [b]{n}[/b] commandable points (outputs and values) "
+                       "of this device.", 15, size_hint_y=None, height=dp(64)))
+    mode = spinner([f"Only my priority ({app.core.priority})", "All priorities 1-16 (everything)"],
+                   "All priorities 1-16 (everything)", size_hint_y=None, height=dp(46))
+    box.add_widget(mode)
+    r = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(6))
+    oos = CheckBox(active=True, size_hint_x=None, width=dp(40))
+    r.add_widget(oos)
+    r.add_widget(lbl("Also set Out-of-service back to NO (inputs too)", 14))
+    box.add_widget(r)
+    status = lbl("", 14, color=T["muted"], size_hint_y=None, height=dp(70))
+    box.add_widget(status)
+    cancel = threading.Event()
+    go = btn("RELEASE ALL", None, "accent", size=17, size_hint_y=None, height=dp(60))
+    stop = btn("Cancel", None, size_hint_y=None, height=dp(48))
+
+    def done(res):
+        go.disabled = False
+        if "error" in res:
+            status.text = f"[color={hexc(T['danger'])}]{res['error']}[/color]"
+            return
+        txt = (f"[b]{res['released']}[/b] of {res['points']} points released "
+               f"({res['commands']} commands)")
+        if res.get("not_commanded"):
+            txt += f", {res['not_commanded']} had no command"
+        if oos.active:
+            txt += f"\nOut-of-service cleared on {res['oos_cleared']} points"
+        if res["failed"]:
+            txt += f"\n[color={hexc(T['danger'])}]{len(res['failed'])} failed: " \
+                   f"{'; '.join(res['failed'][:3])}[/color]"
+        if res.get("cancelled"):
+            txt += "  (stopped)"
+        status.text = txt
+        stop.text = "Close"
+        toast("Release all finished")
+        if after:
+            after()
+
+    def start():
+        go.disabled = True
+        cancel.clear()
+        status.text = "Starting…"
+        app.core.release_all(dev, oids, mode.text.startswith("All"), app.core.priority, oos.active,
+                             lambda m: setattr(status, "text", m), done, cancel)
+
+    def close():
+        cancel.set()
+        pop.dismiss()
+    go.bind(on_release=lambda *a: start())
+    stop.bind(on_release=lambda *a: close())
+    box.add_widget(go)
+    box.add_widget(stop)
+    pop.open()
+    return pop
+
+
 # ---------------------------------------------------------------------------- screens
 class BaseScreen(Screen):
     title = ""
@@ -430,7 +649,8 @@ class DeviceScreen(BaseScreen):
         self.dev = None
         self.items: List[PointInfo] = []
         bar = self.header("Device")
-        bar.add_widget(btn("Reload", lambda: self.load(True), size_hint_x=None, width=dp(84)))
+        bar.add_widget(btn("Release all", self.release_all, "accent", size=13, size_hint_x=None, width=dp(96)))
+        bar.add_widget(btn("Reload", lambda: self.load(True), size_hint_x=None, width=dp(76)))
         flt = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(6))
         self.type_sp = spinner([n for n, _ in TYPE_FILTERS], "All", lambda v: self.show(),
                                size_hint_x=None, width=dp(120))
@@ -491,6 +711,12 @@ class DeviceScreen(BaseScreen):
         self.rv.data = rows
         self.info.text = f"{len(rows)} of {len(self.items)} points  ·  tap value = write  ·  + = add to Watch"
 
+    def release_all(self):
+        if self.dev is None or not self.items:
+            toast("Open a device and wait for its points first")
+            return
+        release_all_popup(self.app, self.dev, [p.oid for p in self.items], after=self.show)
+
     def tap(self, zone: str, p: PointInfo):
         dev = self.dev
         if zone == "value":
@@ -548,6 +774,11 @@ class PointScreen(BaseScreen):
         acts.add_widget(self.watch_btn)
         acts.add_widget(btn("Refresh", self.load))
         self.root_box.add_widget(acts)
+        acts2 = BoxLayout(size_hint_y=None, height=dp(50), spacing=dp(8))
+        self.oos_btn = btn("Out of service: ?", self.toggle_oos, size=14)
+        acts2.add_widget(self.oos_btn)
+        acts2.add_widget(btn("Write property…", self.write_other, size=14))
+        self.root_box.add_widget(acts2)
         self.grid = GridLayout(cols=1, size_hint_y=None, spacing=dp(1))
         self.grid.bind(minimum_height=self.grid.setter("height"))
         sc = ScrollView(do_scroll_x=False)
@@ -586,6 +817,11 @@ class PointScreen(BaseScreen):
         st = core.units_cache.get((self.dev.instance, oid, "st"))
         self.big.text = value_text(self.props.get(C.PROP_PRESENT_VALUE), oid, units, st)
         self.flash.update((self.dev.instance, oid), self.big.text)
+        if C.PROP_OUT_OF_SERVICE in self.props:
+            oos = bool(self.props[C.PROP_OUT_OF_SERVICE])
+            self.oos_btn.text = f"Out of service: {'YES  (tap = NO)' if oos else 'NO  (tap = YES)'}"
+        else:
+            self.oos_btn.text = "Out of service: ?"
         self.pv_row = None
         flags = self.props.get(C.PROP_STATUS_FLAGS)
         on = [C.STATUS_FLAGS_BITS[i] for i, b in enumerate(flags.bits[:4]) if b] \
@@ -617,7 +853,7 @@ class PointScreen(BaseScreen):
             if r.prop == C.PROP_RELIABILITY:
                 col = T["good"] if not r.value else T["danger"]
             row = self._row(C.property_name(r.prop), val, col,
-                            bold=r.prop in colors or r.prop == C.PROP_RELIABILITY)
+                            bold=r.prop in colors or r.prop == C.PROP_RELIABILITY, prop=r.prop)
             if r.prop == C.PROP_PRESENT_VALUE:
                 self.pv_row = row
             self.grid.add_widget(row)
@@ -632,14 +868,45 @@ class PointScreen(BaseScreen):
         if self.pv_row is not None:
             self.pv_row.bg = list((T["flash"] if b else T["flash2"]) if on else T["card"])
 
-    def _row(self, name, value, color, bold=False, prio: Optional[int] = None):
+    def _row(self, name, value, color, bold=False, prio: Optional[int] = None, prop: Optional[int] = None):
         row = Card(size_hint_y=None, height=dp(44), padding=(dp(10), 0), spacing=dp(6))
         row.add_widget(lbl(name, 14, color=color if bold else T["muted"], bold=bold, size_hint_x=0.5,
                            shorten=True))
         row.add_widget(lbl(value[:200], 14, color=color, bold=bold, size_hint_x=0.5, shorten=True))
         if prio is not None and self.oid is not None and self.oid.type in C.COMMANDABLE_TYPES:
             row.bind(on_touch_up=lambda w, t, p=prio: self._prio_tap(w, t, p))
+        elif prop is not None:
+            row.bind(on_touch_up=lambda w, t, p=prop: self._prop_tap(w, t, p))
         return row
+
+    def _prop_tap(self, w, touch, prop):
+        """Tap any property row to write it (out-of-service, description, limits ...)."""
+        if w.collide_point(*touch.pos) and abs(touch.y - touch.oy) < 10 and abs(touch.x - touch.ox) < 10:
+            if prop == C.PROP_PRESENT_VALUE:
+                self.write()
+            else:
+                prop_write_popup(self.app, self.dev, self.oid, prop, self.props.get(prop),
+                                 after=lambda v: Clock.schedule_once(lambda dt: self.load(), 0.3))
+            return True
+        return False
+
+    def toggle_oos(self):
+        if self.dev is None or self.oid is None:
+            return
+        new = not bool(self.props.get(C.PROP_OUT_OF_SERVICE))
+
+        def ok(_v):
+            toast(f"Out of service = {'YES' if new else 'NO'}")
+            Clock.schedule_once(lambda dt: self.load(), 0.3)
+        self.app.core.write_any(self.dev, self.oid, C.PROP_OUT_OF_SERVICE, new, None, ok,
+                                lambda e: message("Write failed", f"Out-of-service: {e}"))
+
+    def write_other(self):
+        if self.dev is None or self.oid is None:
+            return
+        prop_write_popup(self.app, self.dev, self.oid, C.PROP_OUT_OF_SERVICE,
+                         self.props.get(C.PROP_OUT_OF_SERVICE),
+                         after=lambda v: Clock.schedule_once(lambda dt: self.load(), 0.3), choose_prop=True)
 
     def _prio_tap(self, w, touch, prio):
         if w.collide_point(*touch.pos) and abs(touch.y - touch.oy) < 10:
@@ -1153,6 +1420,14 @@ class SettingsScreen(BaseScreen):
         grid.add_widget(r)
         grid.add_widget(btn("Change password", self.change_password, size_hint_y=None, height=dp(48)))
         grid.add_widget(btn("Log out", app.logout, "danger", size_hint_y=None, height=dp(48)))
+        section("Licence")
+        tr = app.trial
+        grid.add_widget(lbl("[b]Activated[/b] - no time limit" if tr.activated() else
+                            f"Trial: [b]{tr.days_left()} days left[/b] (ends {tr.expiry_date()})", 14,
+                            color=T["good"] if tr.activated() else T["fg"], size_hint_y=None, height=dp(30)))
+        if not tr.activated():
+            grid.add_widget(btn("Enter activation password", lambda: app.show_trial_lock(early=True),
+                                size_hint_y=None, height=dp(46)))
         section("Log")
         grid.add_widget(btn("Show communication log", self.show_log, size_hint_y=None, height=dp(46)))
         grid.add_widget(lbl(f"{APP_NAME} {APP_VERSION} - Android version of Basil BACnet Explorer",
@@ -1267,6 +1542,9 @@ class LoginView(BoxLayout):
         self.msg = lbl("", 14, color=T["danger"], halign="center", size_hint_y=None, height=dp(28))
         self.add_widget(self.msg)
         self.add_widget(btn("LOGIN", self.login, "accent", size=18, size_hint_y=None, height=dp(56)))
+        if not app.trial.activated():
+            self.add_widget(lbl(f"Trial version - {app.trial.days_left()} days left", 13, color=T["muted"],
+                                halign="center", size_hint_y=None, height=dp(26)))
         self.add_widget(Label())
 
     def login(self):
@@ -1291,6 +1569,62 @@ class LoginView(BoxLayout):
             self.msg.text = f"Wrong username or password ({authcore.MAX_TRIES - self.tries} tries left)"
 
 
+class TrialView(BoxLayout):
+    """Shown when the 30-day trial has ended: the app stays locked until the activation password
+    is entered (early=True: opened from Settings to activate before the end)."""
+
+    def __init__(self, app: "BasilApp", early: bool = False, **kw):
+        super().__init__(orientation="vertical", padding=(dp(28), dp(40)), spacing=dp(12), **kw)
+        self.app = app
+        self.early = early
+        self.tries = 0
+        self.locked_until = 0.0
+        with self.canvas.before:
+            Color(*T["bg"])
+            self._bg = Rectangle(pos=self.pos, size=self.size)
+        self.bind(pos=lambda *a: setattr(self._bg, "pos", self.pos), size=lambda *a: setattr(self._bg, "size", self.size))
+        logo = os.path.join(app.assets, "logo_256.png")
+        if os.path.exists(logo):
+            self.add_widget(Image(source=logo, size_hint_y=None, height=dp(96)))
+        self.add_widget(lbl(f"[b]{APP_NAME}[/b]", 26, halign="center", size_hint_y=None, height=dp(40)))
+        if early:
+            head = (f"Trial: {app.trial.days_left()} days left.\n"
+                    "Enter the activation password to remove the time limit.")
+        else:
+            head = (f"[b]The {app.trial.days} day trial has ended.[/b]\n"
+                    "Enter the activation password to keep using the app.")
+        self.add_widget(lbl(head, 15, color=T["fg"] if early else T["danger"], halign="center",
+                            size_hint_y=None, height=dp(66)))
+        self.pw = inp("", "Activation password", password=True, size_hint_y=None, height=dp(52))
+        self.pw.bind(on_text_validate=lambda *_: self.activate())
+        self.add_widget(self.pw)
+        self.msg = lbl("", 14, color=T["danger"], halign="center", size_hint_y=None, height=dp(28))
+        self.add_widget(self.msg)
+        self.add_widget(btn("ACTIVATE", self.activate, "accent", size=18, size_hint_y=None, height=dp(56)))
+        if early:
+            self.add_widget(btn("Back", app.show_main, size_hint_y=None, height=dp(48)))
+        self.add_widget(Label())
+
+    def activate(self):
+        now = time.time()
+        if now < self.locked_until:
+            self.msg.text = f"Too many attempts - wait {int(self.locked_until - now) + 1} s"
+            return
+        if self.app.trial.activate(self.pw.text):
+            self.app.core.save()
+            toast("Activated - thank you!")
+            self.app.start_after_trial()
+            return
+        self.tries += 1
+        self.pw.text = ""
+        if self.tries >= authcore.MAX_TRIES:
+            self.tries = 0
+            self.locked_until = now + authcore.LOCK_SECONDS
+            self.msg.text = f"Too many attempts - locked for {authcore.LOCK_SECONDS} s"
+        else:
+            self.msg.text = f"Wrong activation password ({authcore.MAX_TRIES - self.tries} tries left)"
+
+
 # ---------------------------------------------------------------------------- app
 class BasilApp(App):
     title = APP_NAME
@@ -1309,11 +1643,43 @@ class BasilApp(App):
         self.graphics = GraphicsModel(self.core)
         self.back_stack: List[str] = []
         self.holder = BoxLayout()
+        self.trial = authcore.Trial(self.core.settings)
+        self.trial.touch()
+        self.core.save()
+        Clock.schedule_interval(lambda dt: self.check_trial(), 600)      # also stops a long-running app
+        if self.trial.expired():
+            self.holder.add_widget(TrialView(self))
+        else:
+            self.start_after_trial()
+        return self.holder
+
+    def start_after_trial(self):
+        """Normal start: auto login or the login screen."""
+        self.holder.clear_widgets()
         if self.core.auth.autologin_ok():
             Clock.schedule_once(lambda dt: self.show_main(), 0)
         else:
             self.holder.add_widget(LoginView(self))
-        return self.holder
+
+    def check_trial(self):
+        self.trial.touch()
+        self.core.save()
+        if self.trial.expired() and not isinstance(self.holder.children[0] if self.holder.children else None,
+                                                   TrialView):
+            self.show_trial_lock()
+
+    def show_trial_lock(self, early: bool = False):
+        """Lock the app (trial over) - or, early=True, let the user activate from Settings."""
+        if not early:
+            try:
+                self.core.disconnect()          # stop all BACnet traffic while locked
+            except Exception:
+                pass
+            if getattr(self, "_status_ev", None):
+                self._status_ev.cancel()
+                self._status_ev = None
+        self.holder.clear_widgets()
+        self.holder.add_widget(TrialView(self, early=early))
 
     @property
     def assets(self) -> str:
@@ -1324,6 +1690,9 @@ class BasilApp(App):
 
     # ---- main UI
     def show_main(self):
+        if self.trial.expired():
+            self.show_trial_lock()
+            return
         self.holder.clear_widgets()
         root = BoxLayout(orientation="vertical")
         top = Card(bg=T["bar"], size_hint_y=None, height=dp(56), padding=(dp(10), dp(6)), spacing=dp(8))

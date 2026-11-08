@@ -25,7 +25,7 @@ from authcore import Auth
 from xlsx_export import Sheet, write_xlsx
 
 APP_NAME = "Basil BACnet"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 POINT_TYPES = {0, 1, 2, 3, 4, 5, 13, 14, 19, 23, 24, 40, 45, 46, 48, 54, 55}
 UNIT_SHORT = {62: "°C", 64: "°F", 98: "%", 29: "%RH", 53: "Pa", 54: "kPa", 55: "bar", 58: "inH2O",
@@ -461,6 +461,112 @@ class Core:
                 info.value = v
             done(v)
         self._bg(work, ok, error)
+
+    def write_any(self, dev: DeviceInfo, oid: ObjectId, prop: int, value: Any, priority: Optional[int],
+                  done: Callable[[Any], None], error: Callable[[Exception], None]):
+        """Write any property (out-of-service, description, limits ...), optional priority.
+        Afterwards the present value is read back and the lists / watch are updated."""
+        cl = self.client
+        if not cl:
+            error(BACnetException("Not connected"))
+            return
+
+        def work():
+            cl.write_property(dev.address, oid, prop, value, priority)
+            try:
+                return cl.read_property(dev.address, oid, C.PROP_PRESENT_VALUE, timeout=2.0)
+            except BACnetException:
+                return None
+
+        def ok(v):
+            if v is not None:
+                for w in self.watch:
+                    if w.key == (dev.instance, oid.type, oid.instance):
+                        self._set_watch_value(w, v)
+                info = self.points.get(dev.instance, {}).get(oid)
+                if info is not None:
+                    info.value = v
+            done(v)
+        self._bg(work, ok, error)
+
+    def read_any(self, dev: DeviceInfo, oid: ObjectId, prop: int, done: Callable[[Any], None],
+                 error: Callable[[Exception], None]):
+        cl = self.client
+        if not cl:
+            error(BACnetException("Not connected"))
+            return
+        self._bg(lambda: cl.read_property(dev.address, oid, prop, timeout=3.0), done, error)
+
+    def release_all(self, dev: DeviceInfo, oids: Sequence[ObjectId], all_levels: bool, priority: int,
+                    clear_oos: bool, progress: Callable[[str], None], done: Callable[[Dict[str, Any]], None],
+                    cancel: Optional[threading.Event] = None):
+        """Release (write NULL) the commands of every commandable point of a device in one go.
+        all_levels=False: only at `priority`.  all_levels=True: every priority 1-16 that holds a
+        command (read from the priority-array).  clear_oos: also set Out-of-service back to FALSE."""
+        cl = self.client
+        if not cl:
+            done({"error": "Not connected"})
+            return
+        targets = [o for o in oids if o.type in C.COMMANDABLE_TYPES]
+        io = C.ANALOG_TYPES | C.BINARY_TYPES | C.MULTISTATE_TYPES
+        others = [o for o in oids if o.type in io and o.type not in C.COMMANDABLE_TYPES] if clear_oos else []
+
+        def work():
+            res = {"points": len(targets), "released": 0, "commands": 0, "not_commanded": 0,
+                   "failed": [], "oos_cleared": 0}
+            for i, oid in enumerate(targets, 1):
+                if cancel is not None and cancel.is_set():
+                    res["cancelled"] = True
+                    break
+                self.post(lambda i=i, oid=oid: progress(f"Releasing {i}/{len(targets)}  {oid.short}"))
+                try:
+                    if all_levels:
+                        try:
+                            pa = cl.read_property(dev.address, oid, C.PROP_PRIORITY_ARRAY, timeout=3.0)
+                            levels = [k + 1 for k, v in enumerate(pa or []) if not isinstance(v, X.Null)]
+                        except BACnetException:
+                            levels = list(range(1, 17))          # no priority-array: release them all
+                    else:
+                        levels = [priority]
+                    if not levels:
+                        res["not_commanded"] += 1
+                    ok_any = False
+                    err = None
+                    for lv in levels:
+                        try:
+                            cl.write_property(dev.address, oid, C.PROP_PRESENT_VALUE, X.NULL, lv)
+                            res["commands"] += 1
+                            ok_any = True
+                        except BACnetException as e:
+                            err = e
+                    if ok_any:
+                        res["released"] += 1
+                    elif err is not None:
+                        res["failed"].append(f"{oid.short}: {err}")
+                except Exception as e:  # noqa
+                    res["failed"].append(f"{oid.short}: {e}")
+                if clear_oos:
+                    try:
+                        cl.write_property(dev.address, oid, C.PROP_OUT_OF_SERVICE, False)
+                        res["oos_cleared"] += 1
+                    except Exception:
+                        pass
+            for oid in others:                               # inputs: only out-of-service
+                if cancel is not None and cancel.is_set():
+                    break
+                try:
+                    cl.write_property(dev.address, oid, C.PROP_OUT_OF_SERVICE, False)
+                    res["oos_cleared"] += 1
+                except Exception:
+                    pass
+            # fresh values for the list
+            infos = [self.points[dev.instance][o] for o in oids if o in self.points.get(dev.instance, {})]
+            try:
+                self._read_values(dev, infos)
+            except Exception:
+                pass
+            return res
+        self._bg(work, done, lambda e: done({"error": str(e)}))
 
     # ------------------------------------------------------------------ watch list
     def in_watch(self, dev: int, oid: ObjectId) -> bool:
